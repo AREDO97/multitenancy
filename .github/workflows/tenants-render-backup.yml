@@ -1,0 +1,86 @@
+
+name: Render Database Backup
+
+on:
+  # Run every day at 1:00 AM UTC (4:00 AM Uganda time)
+  schedule:
+      - cron: '*/5 * * * *'
+
+  # Allow manual backups from GitHub Actions
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    name: Backup Render PostgreSQL
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create and verify database backup
+        env:
+          PGHOST: ${{ secrets.RENDER_DB_HOST }}
+          PGPORT: '5432'
+          PGDATABASE: ${{ secrets.RENDER_DB_NAME }}
+          PGUSER: ${{ secrets.RENDER_DB_USER }}
+          PGPASSWORD: ${{ secrets.RENDER_DB_PASSWORD }}
+          PGSSLMODE: require
+
+        run: |
+          set -euo pipefail
+
+          if [ -z "$PGHOST" ] || [ -z "$PGDATABASE" ] || \
+             [ -z "$PGUSER" ] || [ -z "$PGPASSWORD" ]; then
+            echo "ERROR: One or more database secrets are missing."
+            exit 1
+          fi
+
+          mkdir -p backups
+
+          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+          BACKUP_FILE="tenants-db-${TIMESTAMP}.dump"
+
+          echo "Starting Render PostgreSQL backup..."
+
+          docker run --rm \
+            -e PGHOST \
+            -e PGPORT \
+            -e PGDATABASE \
+            -e PGUSER \
+            -e PGPASSWORD \
+            -e PGSSLMODE \
+            -e BACKUP_FILE="$BACKUP_FILE" \
+            -v "$PWD/backups:/backups" \
+            postgres:18-alpine \
+            sh -euc '
+              echo "Running pg_dump..."
+
+              pg_dump \
+                --no-owner \
+                --no-acl \
+                --format=custom \
+                --verbose \
+                --file="/backups/$BACKUP_FILE"
+
+              echo "Checking backup file..."
+
+              test -s "/backups/$BACKUP_FILE"
+
+              echo "Verifying PostgreSQL archive..."
+
+              pg_restore --list "/backups/$BACKUP_FILE" > /dev/null
+
+              echo "Backup archive verified successfully."
+            '
+
+          echo "Backup completed."
+          ls -lh "backups/$BACKUP_FILE"
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenants-render-backup-${{ github.run_id }}
+          path: backups/*.dump
+          if-no-files-found: error
+          retention-days: 30
